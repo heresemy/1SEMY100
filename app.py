@@ -10,21 +10,10 @@ import json
 import like_pb2
 import like_count_pb2
 import uid_generator_pb2
-import time
-import random  # <-- Yahan random module ko add kiya hai
-from collections import defaultdict
+import random
 from datetime import datetime
 
 app = Flask(__name__)
-
-# ✅ Per-key rate limit setup
-KEY_LIMIT = 300
-token_tracker = defaultdict(lambda: [0, time.time()])  # token: [count, last_reset_time]
-
-def get_today_midnight_timestamp():
-    now = datetime.now()
-    midnight = datetime(now.year, now.month, now.day)
-    return midnight.timestamp()
 
 def load_tokens(server_name):
     if server_name == "IND":
@@ -68,7 +57,6 @@ async def send_request(encrypted_uid, token, url):
         async with session.post(url, data=edata, headers=headers) as response:
             return response.status
 
-# 🔄 Is function ke andar random selection lagaya hai
 async def send_multiple_requests(uid, server_name, url):
     region = server_name
     protobuf_message = create_protobuf_message(uid, region)
@@ -76,11 +64,7 @@ async def send_multiple_requests(uid, server_name, url):
     tasks = []
     
     tokens = load_tokens(server_name)
-    
-    # Agar kisi file mein total tokens 100 se kam hon toh error na aaye, isliye min() lagaya hai
-    sample_size = min(100, len(tokens))
-    
-    # Yeh line total tokens (jaise 150) mein se bina repeat kiye koi bhi 100 random tokens chun legi
+    sample_size = min(220, len(tokens))
     random_tokens = random.sample(tokens, sample_size)
     
     for t in random_tokens:
@@ -142,7 +126,7 @@ def handle_requests():
     server_name = request.args.get("server_name", "").upper()
     key = request.args.get("key")
 
-    if key != "SEMY1":
+    if key != "SEMY50":
         return jsonify({"error": "Invalid or missing API key 🔑"}), 403
 
     if not uid or not server_name:
@@ -153,26 +137,13 @@ def handle_requests():
         token = data[0]['token']
         encrypt = enc(uid)
 
-        today_midnight = get_today_midnight_timestamp()
-        count, last_reset = token_tracker[token]
-
-        if last_reset < today_midnight:
-            token_tracker[token] = [0, time.time()]
-            count = 0
-
-        if count >= KEY_LIMIT:
-            return {
-                "error": "Daily request limit reached for this key.",
-                "status": 429,
-                "remains": f"(0/{KEY_LIMIT})"
-            }
-
+        # Pehle check karne ke liye request bheji
         before = make_request(encrypt, server_name, token)
         jsone = MessageToJson(before)
         data = json.loads(jsone)
         before_like = int(data['AccountInfo'].get('Likes', 0))
 
-        # Select URL
+        # URL Select karein
         if server_name == "IND":
             url = "https://client.ind.freefiremobile.com/LikeProfile"
         elif server_name in {"BR", "US", "SAC", "NA"}:
@@ -180,8 +151,10 @@ def handle_requests():
         else:
             url = "https://clientbp.ggblueshark.com/LikeProfile"
 
+        # 100 random tokens ke sath like bheje
         asyncio.run(send_multiple_requests(uid, server_name, url))
 
+        # Baad mein check karne ke liye request bheji
         after = make_request(encrypt, server_name, token)
         jsone = MessageToJson(after)
         data = json.loads(jsone)
@@ -193,20 +166,13 @@ def handle_requests():
         like_given = after_like - before_like
         status = 1 if like_given != 0 else 2
 
-        if like_given > 0:
-            token_tracker[token][0] += 1
-            count += 1
-
-        remains = KEY_LIMIT - count
-
         result = {
             "LikesGivenByAPI": like_given,
             "LikesafterCommand": after_like,
             "LikesbeforeCommand": before_like,
             "PlayerNickname": name,
             "UID": id,
-            "status": status,
-            "remains": f"({remains}/{KEY_LIMIT})"
+            "status": status
         }
         return result
 
