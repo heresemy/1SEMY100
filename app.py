@@ -64,7 +64,7 @@ async def send_multiple_requests(uid, server_name, url):
     tasks = []
     
     tokens = load_tokens(server_name)
-    sample_size = min(220, len(tokens))
+    sample_size = min(100, len(tokens))
     random_tokens = random.sample(tokens, sample_size)
     
     for t in random_tokens:
