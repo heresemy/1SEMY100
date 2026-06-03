@@ -16,15 +16,19 @@ from datetime import datetime
 app = Flask(__name__)
 
 def load_tokens(server_name):
-    if server_name == "IND":
-        with open("token_ind.json", "r") as f:
-            return json.load(f)
-    elif server_name in {"BR", "US", "SAC", "NA"}:
-        with open("token_br.json", "r") as f:
-            return json.load(f)
-    else:
-        with open("token_bd.json", "r") as f:
-            return json.load(f)
+    try:
+        if server_name == "IND":
+            with open("token_ind.json", "r") as f:
+                return json.load(f)
+        elif server_name in {"BR", "US", "SAC", "NA"}:
+            with open("token_br.json", "r") as f:
+                return json.load(f)
+        else:
+            with open("token_bd.json", "r") as f:
+                return json.load(f)
+    except Exception as e:
+        print(f"Error loading tokens: {e}")
+        return []
 
 def encrypt_message(plaintext):
     key = b'Yg&tc%DEuh6%Zc^8'
@@ -53,9 +57,13 @@ async def send_request(encrypted_uid, token, url):
         'X-GA': "v1 1",
         'ReleaseVersion': "OB53"
     }
-    async with aiohttp.ClientSession() as session:
-        async with session.post(url, data=edata, headers=headers) as response:
-            return response.status
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.post(url, data=edata, headers=headers, timeout=5) as response:
+                return response.status
+    except Exception as e:
+        print(f"Request failed for token: {e}")
+        return 500
 
 async def send_multiple_requests(uid, server_name, url):
     region = server_name
@@ -64,15 +72,23 @@ async def send_multiple_requests(uid, server_name, url):
     tasks = []
     
     tokens = load_tokens(server_name)
-    sample_size = min(100, len(tokens))
-    random_tokens = random.sample(tokens, sample_size)
-    
-    for t in random_tokens:
-        token = t["token"]
-        tasks.append(send_request(encrypted_uid, token, url))
+    if not tokens:
+        return []
         
-    results = await asyncio.gather(*tasks)
-    return results
+    # ✅ FIX: Agar tokens list khali ya choti hai toh crash nahi karega
+    sample_size = min(100, len(tokens))
+    
+    if sample_size > 0:
+        random_tokens = random.sample(tokens, sample_size)
+        for t in random_tokens:
+            token = t.get("token")
+            if token:
+                tasks.append(send_request(encrypted_uid, token, url))
+                
+    if tasks:
+        results = await asyncio.gather(*tasks, return_exceptions=True)
+        return results
+    return []
 
 def create_protobuf(uid):
     message = uid_generator_pb2.uid_generator()
@@ -106,10 +122,14 @@ def make_request(encrypt, server_name, token):
         'ReleaseVersion': "OB53"
     }
 
-    response = requests.post(url, data=edata, headers=headers, verify=False)
-    hex_data = response.content.hex()
-    binary = bytes.fromhex(hex_data)
-    return decode_protobuf(binary)
+    try:
+        response = requests.post(url, data=edata, headers=headers, verify=False, timeout=5)
+        hex_data = response.content.hex()
+        binary = bytes.fromhex(hex_data)
+        return decode_protobuf(binary)
+    except Exception as e:
+        print(f"Error in make_request: {e}")
+        return None
 
 def decode_protobuf(binary):
     try:
@@ -126,24 +146,30 @@ def handle_requests():
     server_name = request.args.get("server_name", "").upper()
     key = request.args.get("key")
 
-    if key != "SEMY50":
+    if key != "SEMY1":
         return jsonify({"error": "Invalid or missing API key 🔑"}), 403
 
     if not uid or not server_name:
         return jsonify({"error": "UID and server_name are required"}), 400
 
-    def process_request():
+    try:
         data = load_tokens(server_name)
+        if not data:
+            return jsonify({"error": f"No tokens found for server {server_name}"}), 500
+            
         token = data[0]['token']
         encrypt = enc(uid)
 
-        # Pehle check karne ke liye request bheji
         before = make_request(encrypt, server_name, token)
-        jsone = MessageToJson(before)
-        data = json.loads(jsone)
-        before_like = int(data['AccountInfo'].get('Likes', 0))
+        before_like = 0
+        if before:
+            try:
+                jsone = MessageToJson(before)
+                data_json = json.loads(jsone)
+                before_like = int(data_json.get('AccountInfo', {}).get('Likes', 0))
+            except Exception:
+                pass
 
-        # URL Select karein
         if server_name == "IND":
             url = "https://client.ind.freefiremobile.com/LikeProfile"
         elif server_name in {"BR", "US", "SAC", "NA"}:
@@ -151,17 +177,30 @@ def handle_requests():
         else:
             url = "https://clientbp.ggblueshark.com/LikeProfile"
 
-        # 100 random tokens ke sath like bheje
-        asyncio.run(send_multiple_requests(uid, server_name, url))
+        # ✅ FIX: Loop conflict se bachne ke liye new event loop handling
+        try:
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            loop.run_until_complete(send_multiple_requests(uid, server_name, url))
+            loop.close()
+        except Exception as async_err:
+            print(f"Asyncio loop error: {async_err}")
 
-        # Baad mein check karne ke liye request bheji
         after = make_request(encrypt, server_name, token)
-        jsone = MessageToJson(after)
-        data = json.loads(jsone)
+        
+        after_like = before_like
+        id = int(uid)
+        name = "Unknown"
 
-        after_like = int(data['AccountInfo']['Likes'])
-        id = int(data['AccountInfo']['UID'])
-        name = str(data['AccountInfo']['PlayerNickname'])
+        if after:
+            try:
+                jsone = MessageToJson(after)
+                data_json = json.loads(jsone)
+                after_like = int(data_json.get('AccountInfo', {}).get('Likes', before_like))
+                id = int(data_json.get('AccountInfo', {}).get('UID', uid))
+                name = str(data_json.get('AccountInfo', {}).get('PlayerNickname', 'Unknown'))
+            except Exception:
+                pass
 
         like_given = after_like - before_like
         status = 1 if like_given != 0 else 2
@@ -174,10 +213,11 @@ def handle_requests():
             "UID": id,
             "status": status
         }
-        return result
+        return jsonify(result)
 
-    result = process_request()
-    return jsonify(result)
+    except Exception as global_err:
+        print(f"Global Error: {global_err}")
+        return jsonify({"error": "Internal Server Error occured in processing", "details": str(global_err)}), 500
 
 if __name__ == '__main__':
-    app.run(debug=True, use_reloader=False)
+    app.run(debug=True, use_reloader=False, host='0.0.0.0', port=5000)
