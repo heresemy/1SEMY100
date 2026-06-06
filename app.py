@@ -278,10 +278,10 @@ async def fetch_personal_token(session, uid, password):
                 text = await res.text()
                 try:
                     data = json.loads(text)
-                    if isinstance(data, list) and len(data) > 0 and "jwt" in data[0]:
-                        return data[0]["jwt"]
-                    elif isinstance(data, dict) and "jwt" in data:
-                        return data["jwt"]
+                    if isinstance(data, list) and len(data) > 0 and "token" in data[0]:
+                        return data[0]["token"]
+                    elif isinstance(data, dict) and "token" in data:
+                        return data["token"]
                 except:
                     pass
     except Exception as e:
